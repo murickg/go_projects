@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/schollz/progressbar/v3"
 	"golang.org/x/time/rate"
 )
 
@@ -31,6 +32,7 @@ func main() {
 	rateLimit := flag.Int("rate-limit", 10, "лимит запросов в секунду")
 	timeout := flag.Int("timeout", 5, "таймаут для HTTP запросов в секундах")
 	output := flag.String("output", "results.csv", "файл для сохранения результатов")
+	retries := flag.Int("retry", 0, "количество повторных попыток при ошибках")
 	flag.Parse()
 
 	// Загрузка URl
@@ -40,7 +42,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Запуск парсера: %d URL, %d воркеров, %d req/sec\n", len(urls), *workers, *rateLimit)
+	fmt.Printf("Запуск парсера: %d URL, %d воркеров, %d req/sec, %d таймаут, %d повторов\n", len(urls), *workers, *rateLimit, *timeout, *retries)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go handleSignals(cancel)
@@ -51,14 +53,25 @@ func main() {
 	results := make(chan Result)
 	var wg sync.WaitGroup
 
+	bar := progressbar.NewOptions(len(urls),
+		progressbar.OptionSetDescription("Парсинг страниц..."),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetWidth(20),
+		progressbar.OptionClearOnFinish(),
+	)
+
 	for i := 0; i < *workers; i++ {
 		wg.Add(1)
-		go worker(ctx, i+1, jobs, results, limiter, time.Duration(*timeout)*time.Second, &wg)
+		go worker(ctx, i+1, jobs, results, limiter, time.Duration(*timeout)*time.Second, *retries, &wg, bar)
 	}
 
 	go func() {
 		for _, url := range urls {
-			jobs <- url
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- url:
+			}
 		}
 		close(jobs)
 	}()
@@ -69,29 +82,52 @@ func main() {
 	}()
 
 	saveResults(*output, results)
+	bar.Finish()
 	fmt.Println("Парсинг завершен")
 	fmt.Printf("Результаты сохранены в %s\n", *output)
 
 }
 
-func worker(ctx context.Context, id int, jobs <-chan string, results chan<- Result, limiter *rate.Limiter, timeout time.Duration, wg *sync.WaitGroup) {
+func worker(ctx context.Context, id int, jobs <-chan string, results chan<- Result, limiter *rate.Limiter, timeout time.Duration, retries int, wg *sync.WaitGroup, bar *progressbar.ProgressBar) {
 	defer wg.Done()
 	client := &http.Client{
 		Timeout: timeout,
 	}
 
-	for url := range jobs {
-		if err := limiter.Wait(ctx); err != nil {
-			fmt.Printf("Воркер %d: ошибка лимитера: %v\n", id, err)
-			results <- Result{URL: url, Title: "", Err: err}
-			continue
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Printf("Воркер %d: получен сигнал завершения\n", id)
+			return
+
+		case url, ok := <-jobs:
+			if !ok {
+				return
+			}
+			if err := limiter.Wait(ctx); err != nil {
+				results <- Result{URL: url, Err: fmt.Errorf("ошибка лимитатора: %v", err)}
+				bar.Add(1)
+				continue
+			}
+			var title string
+			var err error
+
+			for attempt := 0; attempt <= retries; attempt++ {
+				reqContext, cancel := context.WithTimeout(ctx, timeout)
+				title, err = fetchTitle(reqContext, client, url)
+				cancel()
+
+				if err == nil {
+					break
+				}
+				wait := time.Duration((attempt+1)*2) * time.Second
+				fmt.Printf("Воркер %d: ошибка при парсинге %s: %v (попытка %d, ждем %v)\n", id, url, err, attempt+1, wait)
+				time.Sleep(wait)
+			}
+
+			results <- Result{URL: url, Title: title, Err: err}
+			bar.Add(1)
 		}
-
-		reqContext, cancel := context.WithTimeout(ctx, timeout)
-		title, err := fetchTitle(reqContext, client, url)
-		cancel()
-
-		results <- Result{URL: url, Title: title, Err: err}
 	}
 }
 
