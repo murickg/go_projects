@@ -2,5 +2,12 @@ https://ya.ru
 https://golang.org
 https://google.com
 https://vk.com
-
+https://youtube.com
+https://ru.wikipedia.org
+https://www.sberbank.ru
+https://pandas.pydata.org
+https://www.yahoo.com/
+https://numpy.org
+https://scipy.org
+https://ok.ru
 

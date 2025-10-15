@@ -25,6 +25,14 @@ type Result struct {
 	Err   error
 }
 
+type Stats struct {
+	Total     int
+	Successes int
+	Failures  int
+	Start     time.Time
+	End       time.Time
+}
+
 func main() {
 	// Флаги коммандной строки
 	urlsFile := flag.String("urls", "urls.txt", "файл со списком URL")
@@ -43,6 +51,8 @@ func main() {
 	}
 
 	fmt.Printf("Запуск парсера: %d URL, %d воркеров, %d req/sec, %d таймаут, %d повторов\n", len(urls), *workers, *rateLimit, *timeout, *retries)
+
+	stats := &Stats{Total: len(urls), Start: time.Now()}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go handleSignals(cancel)
@@ -81,7 +91,9 @@ func main() {
 		close(results)
 	}()
 
-	saveResults(*output, results)
+	saveResults(*output, results, stats)
+	stats.End = time.Now()
+	printStats(stats)
 	bar.Finish()
 	fmt.Println("Парсинг завершен")
 	fmt.Printf("Результаты сохранены в %s\n", *output)
@@ -161,7 +173,7 @@ func fetchTitle(ctx context.Context, client *http.Client, url string) (string, e
 	return string(matches[1]), nil
 }
 
-func saveResults(path string, results <-chan Result) {
+func saveResults(path string, results <-chan Result, stats *Stats) {
 	file, err := os.Create(path)
 	if err != nil {
 		fmt.Printf("Ошибка при создании файла: %v\n", err)
@@ -175,12 +187,30 @@ func saveResults(path string, results <-chan Result) {
 	writer.Write([]string{"URL", "Title", "Error"})
 
 	for res := range results {
+
+		if res.Err != nil {
+			stats.Failures++
+		} else {
+			stats.Successes++
+		}
 		errMsg := ""
 		if res.Err != nil {
 			errMsg = res.Err.Error()
 		}
 		writer.Write([]string{res.URL, res.Title, errMsg})
 	}
+}
+
+func printStats(s *Stats) {
+	duration := s.End.Sub(s.Start).Seconds()
+	rate := float64(s.Total) / duration
+
+	fmt.Println("\nСтатистика выполнения:")
+	fmt.Printf("Всего URL: %d\n", s.Total)
+	fmt.Printf("Успешно: %d\n", s.Successes)
+	fmt.Printf("Ошибок: %d\n", s.Failures)
+	fmt.Printf("Общее время: %.2fs\n", duration)
+	fmt.Printf("Средняя скорость: %.2f URL/s\n", rate)
 }
 
 // loadUrls читает файл и возвращает слайс URL
